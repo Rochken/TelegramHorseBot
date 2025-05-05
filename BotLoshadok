@@ -1,0 +1,178 @@
+import logging
+import requests
+from telegram import ReplyKeyboardMarkup, Update
+from telegram.ext import (
+    Updater,
+    CommandHandler,
+    MessageHandler,
+    Filters,
+    ConversationHandler,
+    CallbackContext,
+)
+
+# Настройки
+TELEGRAM_BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"  # 8096503371:AAG0-pkNXknaW10la8Dcgc2kDt_o4HxdWDs
+FUSION_BRAIN_API_KEY = "YOUR_FUSION_BRAIN_API_KEY"  # DFA6B58C6318FBE50912C54703F9E709
+FUSION_BRAIN_SECRET_KEY = "YOUR_FUSION_BRAIN_SECRET_KEY"  # 2FE5F6D30482427C632E17E340B44C74
+DEEPSEEK_API_KEY = "YOUR_DEEPSEEK_API_KEY"  # sk-ae530f148b6d4a94b4db6b4ebf355ba5
+
+# Состояния диалога
+SELECT_TIME, CUSTOM_DESCRIPTION = range(2)
+
+# Логирование
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
+# Промпты для генерации изображений
+def generate_horse_prompt(time_of_day: str, custom_desc: str = "") -> str:
+    if custom_desc:
+        return f"A horse described as '{custom_desc}', photorealistic style"
+    descriptions = {
+        "утро": "A silver-maned horse galloping through a misty meadow at sunrise, photorealistic",
+        "день": "A bright reddish-brown horse with black spots under a midday sun, photorealistic",
+        "вечер": "A dark-cherry horse with golden highlights grazing at sunset, photorealistic",
+        "ночь": "A black horse with glowing patterns on its flanks, galloping under a full moon, photorealistic",
+    }
+    return descriptions.get(time_of_day, "A generic horse")
+
+# Генерация изображения через Кандинский 3.1
+def generate_image_kandinsky(prompt: str) -> str:
+    url = "https://api.fusionbrain.ai/api/v1/generation/run"
+    headers = {
+        "Authorization": f"Bearer {FUSION_BRAIN_API_KEY}",
+        "X-User-Agent": "FusionBrain SDK/1.0",
+        "X-Forwarded-For": "127.0.0.1"
+    }
+    data = {
+        "model": "Kandinsky 3.1",
+        "params": {
+            "prompt": prompt,
+            "width": 1024,
+            "height": 1024,
+            "num_images": 1,
+            "style": "photorealistic"
+        }
+    }
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code == 200:
+            result_id = response.json()["result_id"]
+            # Ожидание завершения генерации
+            time.sleep(30)
+            result_url = f"https://api.fusionbrain.ai/api/v1/generation/result/{result_id}"
+            result_response = requests.get(result_url, headers=headers)
+            if result_response.status_code == 200:
+                return result_response.json()[0]["image_url"]
+        logging.error(f"Ошибка генерации: {response.text}")
+    except Exception as e:
+        logging.error(f"Ошибка запроса: {e}")
+    return None
+
+# Генерация сказки через DeepSeek
+def generate_story_deepseek(prompt: str) -> str:
+    url = "https://api.deepseek.com/v1/services/aigc/text-generation/generation"
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": "deepseek-chat",
+        "prompt": f"Напиши сказку про лошадку: {prompt}"
+    }
+    response = requests.post(url, headers=headers, json=data)
+    if response.status_code == 200:
+        return response.json()["choices"][0]["text"]
+    logging.error(f"Ошибка генерации сказки: {response.text}")
+    return "Ошибка генерации сказки."
+
+# Команда /start
+def start(update: Update, context: CallbackContext) -> int:
+    reply_keyboard = [["Да!"]]
+    update.message.reply_text(
+        "Привет! Мы генерируем лошадок и сказки! Начнём?",
+        reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True),
+    )
+    return SELECT_TIME
+
+# Меню выбора
+def select_time(update: Update, context: CallbackContext) -> int:
+    user_text = update.message.text
+    if user_text == "Да!":
+        reply_keyboard = [
+            ["Утренняя лошадка", "Дневная лошадка"],
+            ["Вечерняя лошадка", "Ночная лошадка"],
+            ["Лошадка по моему описанию", "Сказка про лошадку"],
+        ]
+        update.message.reply_text(
+            "Выберите тип лошадки или сказку:",
+            reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True),
+        )
+        return SELECT_TIME
+    return ConversationHandler.END
+
+# Обработка выбора
+def handle_choice(update: Update, context: CallbackContext) -> int:
+    user_text = update.message.text.lower()
+    if "утрен" in user_text:
+        prompt = generate_horse_prompt("утро")
+    elif "дневн" in user_text:
+        prompt = generate_horse_prompt("день")
+    elif "вечерн" in user_text:
+        prompt = generate_horse_prompt("вечер")
+    elif "ночн" in user_text:
+        prompt = generate_horse_prompt("ночь")
+    elif "опиши" in user_text:
+        update.message.reply_text("Опиши лошадку!")
+        return CUSTOM_DESCRIPTION
+    elif "сказка" in user_text:
+        story = generate_story_deepseek("волшебная лошадка")
+        update.message.reply_text(story)
+        return SELECT_TIME
+    else:
+        update.message.reply_text("Неизвестный выбор.")
+        return SELECT_TIME
+
+    image_url = generate_image_kandinsky(prompt)
+    if image_url:
+        context.bot.send_photo(chat_id=update.effective_chat.id, photo=image_url)
+    else:
+        update.message.reply_text("Ошибка генерации изображения.")
+    return SELECT_TIME
+
+# Обработка пользовательского описания
+def custom_description(update: Update, context: CallbackContext) -> int:
+    user_desc = update.message.text
+    prompt = generate_horse_prompt("", user_desc)
+    image_url = generate_image_kandinsky(prompt)
+    if image_url:
+        context.bot.send_photo(chat_id=update.effective_chat.id, photo=image_url)
+    else:
+        update.message.reply_text("Ошибка генерации изображения.")
+    return SELECT_TIME
+
+# Основная функция
+def main() -> None:
+    updater = Updater(TELEGRAM_BOT_TOKEN)
+    dispatcher = updater.dispatcher
+
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            SELECT_TIME: [
+                MessageHandler(Filters.text & ~Filters.command, handle_choice),
+            ],
+            CUSTOM_DESCRIPTION: [
+                MessageHandler(Filters.text & ~Filters.command, custom_description),
+            ],
+        },
+        fallbacks=[],
+    )
+
+    dispatcher.add_handler(conv_handler)
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == "__main__":
+    main()
